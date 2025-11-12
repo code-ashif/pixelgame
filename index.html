@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pixel Racer '88 — Turbo Chaos Edition</title>
+<style>
+  :root{--bg:#050505;--road:#1d1d1d;--line:#9e9e9e;--coin:#ffd166;--ui:#e6e6e6}
+  html,body{height:100%;margin:0;background:#050505;font-family:monospace;color:var(--ui)}
+  .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px}
+  .box{width:360px;background:#0b0b0b;border-radius:8px;padding:10px;box-shadow:0 12px 40px rgba(0,0,0,.7)}
+  canvas{display:block;width:100%;height:auto;background:#060606;border-radius:6px}
+  .controls{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+  .btn{background:#111;color:var(--ui);border:1px solid rgba(255,255,255,0.03);padding:8px 10px;border-radius:6px;cursor:pointer;transition:background 0.2s}
+  .btn:hover{background:#1a1a1a}
+  .hud{display:flex;gap:8px;justify-content:space-between;margin-top:8px;font-size:13px}
+  .small{font-size:11px;color:#bdbdbd}
+  .right-panel{display:flex;gap:8px;align-items:center}
+  .badge{background:#1a1a1a;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.03);font-weight:700}
+  @media (max-width:420px){.box{width:98%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="box">
+    <canvas id="game" width="300" height="480"></canvas>
+
+    <div class="controls">
+      <div style="display:flex;gap:8px;">
+        <button id="leftBtn" class="btn">◀</button>
+        <button id="rightBtn" class="btn">▶</button>
+      </div>
+
+      <!-- Entire div acts as a start button, but BOOST still works separately -->
+      <div id="startArea" class="btn" 
+           style="display:flex;gap:8px;align-items:center;justify-content:center;width:100%;background:#111;border:1px solid rgba(255,255,255,0.03);border-radius:6px;padding:8px;cursor:pointer">
+        <button id="startBtn" class="btn" style="flex:1">Press SpaceBar to START</button>
+        <button id="boostBtn" class="btn">BOOST</button>
+      </div>
+
+      <div class="right-panel">
+        <div class="badge">Coins: <span id="coinCount">0</span></div>
+        <div class="badge">Nitro: <span id="nitroCount">0</span></div>
+      </div>
+    </div>
+
+    <div class="hud" style="margin-top:10px">
+      <div>Score: <span id="score">0</span></div>
+      <div>High: <span id="high">0</span></div>
+    </div>
+    <div class="small" style="margin-top:6px">
+      Controls: ← → or A/D. Mobile: use arrows. Space or BOOST to activate nitro (5 coins = 1 nitro). Press START to begin.
+    </div>
+  </div>
+</div>
+
+<script>
+/* Pixel Racer '88 — Turbo Chaos Edition */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const startBtn = document.getElementById('startBtn');
+const leftBtn = document.getElementById('leftBtn');
+const rightBtn = document.getElementById('rightBtn');
+const boostBtn = document.getElementById('boostBtn');
+const scoreEl = document.getElementById('score');
+const highEl = document.getElementById('high');
+const coinCountEl = document.getElementById('coinCount');
+const nitroCountEl = document.getElementById('nitroCount');
+const startArea = document.getElementById('startArea');
+
+const LANES = 3; const roadLeft = 36, roadRight = W - 36; let laneCenters = [];
+let playerLane = 1; const playerW = 16, playerH = 24; const playerY = H - 60;
+let switching = false; let switchInvuln = 0;
+
+let enemies = []; let coins = []; let particles = [];
+
+let lastSpawnTime = 0; let spawnInterval = 1400; const MIN_LANE_GAP = 80;
+
+let running = false; let lastTime = 0; let score = 0;
+let high = Number(localStorage.getItem('pixelHigh') || 0); highEl.textContent = high;
+let coinCount = 0; let nitroCount = 0; coinCountEl.textContent = coinCount; nitroCountEl.textContent = nitroCount;
+
+let boosting = false; let boostTimer = 0; const BOOST_DURATION = 2000;
+
+let audioCtx = null; let bgmNode = null; let bgmOn = false;
+function ensureAudio(){ if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+function playSfx(freq, time=0.06, vol=0.08){ try{ if(!audioCtx) ensureAudio(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type='square'; o.frequency.value = freq; g.gain.value = vol; o.connect(g); g.connect(audioCtx.destination); o.start(); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + time); o.stop(audioCtx.currentTime + time + 0.02);}catch(e){} }
+function startBgm(){ try{ if(!audioCtx) ensureAudio(); if(bgmNode) return; const gain = audioCtx.createGain(); gain.gain.value = 0.04; gain.connect(audioCtx.destination); const o1 = audioCtx.createOscillator(); o1.type='square'; o1.frequency.value = 220; o1.connect(gain); o1.start(); bgmNode = {osc:o1,gain:gain}; bgmOn = true; }catch(e){} }
+function stopBgm(){ try{ if(bgmNode){ bgmNode.osc.stop(); bgmNode.gain.disconnect(); bgmNode = null; } bgmOn = false; }catch(e){} }
+
+function drawRect(x,y,w,h,color){ ctx.fillStyle = color; ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h)); }
+
+function initLanes(){ const usable = roadRight - roadLeft; laneCenters = []; for(let i=0;i<LANES;i++) laneCenters.push(Math.round(roadLeft + usable*(i+0.5)/LANES)); }
+
+function laneIsSafe(lane){ for(const e of enemies){ if(e.lane===lane && e.y > -MIN_LANE_GAP) return false; } return true; }
+
+function spawnEnemy(){ const candidates = []; for(let i=0;i<LANES;i++){ if(laneIsSafe(i)) candidates.push(i); }
+  if(candidates.length===0) return; const lane = candidates[Math.floor(Math.random()*candidates.length)]; const x = laneCenters[lane]; const w=14,h=22; const y=-h; const spd = 1.0 + Math.random()*0.6 + Math.floor(score/12)*0.05; enemies.push({lane,x,y,w,h,spd}); }
+
+function spawnCoin(){ const free=[]; for(let i=0;i<LANES;i++){ let ok=true; for(const e of enemies){ if(e.lane===i && e.y > -40) ok=false; } if(ok) free.push(i); } if(free.length===0) return; const lane = free[Math.floor(Math.random()*free.length)]; coins.push({lane, x:laneCenters[lane], y:-8, size:8}); }
+
+function spawnParticle(x,y,dx,dy,color,life,size){ particles.push({x,y,dx,dy,color,life,age:0,size}); }
+
+function coinSparkle(x,y){ for(let i=0;i<10;i++){ const angle=Math.random()*Math.PI*2; const speed=0.6+Math.random()*1.4; spawnParticle(x,y,Math.cos(angle)*speed,Math.sin(angle)*speed,'#ffd166',500+Math.random()*300,2+Math.random()*2); } }
+function explosion(x,y){ for(let i=0;i<24;i++){ const angle=Math.random()*Math.PI*2; const speed=1+Math.random()*2.4; spawnParticle(x,y,Math.cos(angle)*speed,Math.sin(angle)*speed,'#ff7a7a',600+Math.random()*400,2+Math.random()*3); } }
+
+function rectOverlap(ax,ay,aw,ah,bx,by,bw,bh){ return !(ax+aw<bx||ax>bx+bw||ay+ah<by||ay>by+bh); }
+
+function update(t){ if(!running)return; if(!lastTime)lastTime=t; const dt=t-lastTime; lastTime=t;
+  if(switchInvuln>0)switchInvuln-=dt; else switchInvuln=0;
+  if(t-lastSpawnTime>spawnInterval){ lastSpawnTime=t; spawnInterval=1400+Math.random()*400; spawnEnemy(); if(Math.random()<0.45)setTimeout(spawnCoin,200+Math.random()*300); }
+
+  if(boosting){ boostTimer-=dt; if(boostTimer<=0){ boosting=false; boostTimer=0; } }
+  const speedFactor=1+(score/60)+(boosting?1.0:0);
+
+  for(let i=enemies.length-1;i>=0;i--){ const e=enemies[i]; e.y+=e.spd*(dt/16)*speedFactor;
+    if(switchInvuln<=0){ const px=laneCenters[playerLane]-playerW/2; const py=playerY-playerH/2;
+      if(rectOverlap(px,py,playerW,playerH,e.x-e.w/2,e.y-e.h/2,e.w,e.h)){
+        playSfx(220,0.16,0.14); running=false; explosion(laneCenters[playerLane],playerY); gameOver(); return; } }
+    if(e.y>H+40){ enemies.splice(i,1); score+=1; scoreEl.textContent=score; }
+  }
+
+  for(let i=coins.length-1;i>=0;i--){ const c=coins[i]; c.y+=1.2*(dt/16)*speedFactor;
+    const px=laneCenters[playerLane]-playerW/2; const py=playerY-playerH/2;
+    if(rectOverlap(px,py,playerW,playerH,c.x-4,c.y-4,8,8)){
+      coins.splice(i,1); coinCount+=1; coinCountEl.textContent=coinCount; coinSparkle(c.x,c.y); playSfx(1200,0.05,0.08);
+      if(coinCount%5===0){ nitroCount+=1; nitroCountEl.textContent=nitroCount; playSfx(1500,0.06,0.09); }
+    } else if(c.y>H+20) coins.splice(i,1);
+  }
+
+  for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.age+=dt; if(p.age>p.life)particles.splice(i,1);
+    else{ p.x+=p.dx*(dt/16); p.y+=p.dy*(dt/16)+0.2*(dt/16); p.dx*=0.995; p.dy*=0.995; } }
+
+  drawScene(boosting?Math.random()*4-2:0);
+  requestAnimationFrame(update);
+}
+
+function gameOver(){ ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(0,H/2-40,W,80);
+  ctx.fillStyle='#ffd166'; ctx.font='14px monospace'; ctx.textAlign='center'; ctx.fillText('GAME OVER',W/2,H/2-6);
+  ctx.font='11px monospace'; ctx.fillText('Score: '+score,W/2,H/2+12);
+  if(score>high){ high=score; localStorage.setItem('pixelHigh',high); highEl.textContent=high; }
+  stopBgm(); }
+
+function drawScene(shake=0){ ctx.save(); ctx.clearRect(0,0,W,H); if(shake)ctx.translate(shake,0);
+  ctx.fillStyle='#060606'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#1c1c1c'; ctx.fillRect(roadLeft,0,roadRight-roadLeft,H);
+  for(let i=1;i<LANES;i++){ const x=roadLeft+(roadRight-roadLeft)*(i/LANES);
+    for(let y=(Date.now()/24)%30-30;y<H;y+=30){ drawRect(x-2,y,4,14,'#9e9e9e'); } }
+  for(const c of coins){ ctx.fillStyle='#ffd166'; ctx.fillRect(c.x-4,c.y-4,8,8); ctx.fillStyle='#ffffff'; ctx.fillRect(c.x-1,c.y-1,2,2); }
+  for(const e of enemies){ drawRect(e.x-e.w/2,e.y-e.h/2,e.w,e.h,'#ff4f4f'); drawRect(e.x-4,e.y-e.h/2+4,e.w-8,6,'#330000'); }
+  drawRect(laneCenters[playerLane]-playerW/2,playerY-playerH/2,playerW,playerH,'#00d4ff');
+  drawRect(laneCenters[playerLane]-4,playerY-playerH/2+4,8,4,'#002a33');
+  for(const p of particles){ ctx.fillStyle=p.color; ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size); }
+  ctx.restore(); }
+
+window.addEventListener('keydown',e=>{ if(!running&&e.key===' ')start(); if(e.key==='ArrowLeft'||e.key==='a')laneLeft(); if(e.key==='ArrowRight'||e.key==='d')laneRight(); if(e.key===' ')activateBoost(); });
+leftBtn.addEventListener('click',()=>laneLeft());
+rightBtn.addEventListener('click',()=>laneRight());
+boostBtn.addEventListener('click',activateBoost);
+
+startArea.addEventListener('click', (e) => {
+  if (e.target.id !== 'boostBtn') {
+    if (!running) start();
+    else { running = false; setTimeout(() => start(), 120); }
+  }
+});
+
+function laneLeft(){ if(switching||!running)return; if(playerLane>0){ playerLane--; startSwitch(); playSfx(660,0.03,0.06); drawScene(); }}
+function laneRight(){ if(switching||!running)return; if(playerLane<LANES-1){ playerLane++; startSwitch(); playSfx(660,0.03,0.06); drawScene(); }}
+
+function startSwitch(){ switching=true; switchInvuln=220; setTimeout(()=>{switching=false;},220); }
+
+function activateBoost(){ if(!running)return; if(boosting)return; if(nitroCount<=0)return; nitroCount--; nitroCountEl.textContent=nitroCount; boosting=true; boostTimer=BOOST_DURATION; playSfx(1000,0.12,0.12); }
+
+function start(){ enemies=[]; coins=[]; particles=[]; score=0; coinCount=0; nitroCount=0;
+  coinCountEl.textContent=coinCount; nitroCountEl.textContent=nitroCount; scoreEl.textContent=score;
+  lastSpawnTime=performance.now(); spawnInterval=1400+Math.random()*400; playerLane=1; switching=false; switchInvuln=0;
+  running=true; lastTime=0; initLanes(); startBgm(); requestAnimationFrame(update); }
+
+initLanes(); drawScene();
+</script>
+</body>
+</html>
